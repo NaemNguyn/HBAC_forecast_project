@@ -1,0 +1,20 @@
+{
+    "timestamp": "2026-05-18 21:42",
+    "model_version": "v3_abcxyz",
+    "submission_file": "submission_final.csv",
+    "rows": 31944,
+    "tier_ml_skus": 19,
+    "tier_dow_skus": 0,
+    "tier_med_skus": 33,
+    "tier_mean_skus": 0,
+    "tier_zero_skus": 15920,
+    "n_features": 78,
+    "lag_days": "[1, 2, 3, 7, 14, 21, 28, 35, 42, 56, 364, 365, 366]",
+    "nonzero_rows": 54,
+    "pct_zero": 99.84,
+    "mean_forecast": 0.009598,
+    "max_forecast": 40.0,
+    "total_units": 8585.0,
+    "leaderboard_score": 0.54208,
+    "notes": "ABC-XYZ segmentation + revenue features + ADI + CV"
+}

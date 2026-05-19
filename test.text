@@ -1,0 +1,410 @@
+import pandas as pd
+import numpy as np
+import joblib
+import os
+import json
+from datetime import datetime
+
+# Pre-define for Pylance
+TIER_ML   = []
+TIER_DOW  = []
+TIER_MED  = []
+TIER_MEAN = []
+TIER_ZERO = []
+FEAT_COLS = []
+TOP30     = []
+
+grid      = pd.read_parquet('../data/processed/daily_sales.parquet')
+sku_meta  = pd.read_parquet('../data/processed/sku_metadata.parquet')
+sample    = pd.read_csv('../data/raw/sample_submission.csv')
+model     = joblib.load('../models/hgbr_model.pkl')
+FEAT_COLS = joblib.load('../models/feat_cols.pkl')
+TOP30     = joblib.load('../models/top30_skus.pkl')
+
+print(f'Grid shape   : {grid.shape}')
+print(f'SKU meta     : {sku_meta.shape}')
+print(f'Sample rows  : {len(sample)}')
+print(f'Features     : {len(FEAT_COLS)}')
+print(f'Model loaded : ✓')
+
+LAG_DAYS     = [1, 2, 3, 7, 14, 21, 28, 35, 42, 56, 364, 365, 366]
+ROLL_WINDOWS = [7, 14, 28, 56, 90]
+DOW_LAG_WKS  = [1, 2, 4, 8, 12]
+
+def build_features(d, series, meta_row):
+    hist = series[series.index < d]
+    row = {
+        'dow'            : d.dayofweek,
+        'month'          : d.month,
+        'dom'            : d.day,
+        'quarter'        : d.quarter,
+        'week'           : int(d.isocalendar().week),
+        'is_weekend'     : int(d.dayofweek >= 5),
+        'is_tet'         : int((d.month==1 and d.day>=15) or
+                               (d.month==2 and d.day<=15)),
+        'is_month_end'   : int(d.day >= 25),
+        'is_month_start' : int(d.day <= 5),
+        'is_q1'          : int(d.month in [1, 2, 3]),
+        'is_q2'          : int(d.month in [4, 5, 6]),
+        'is_q3'          : int(d.month in [7, 8, 9]),
+        'is_q4'          : int(d.month in [10, 11, 12]),
+        'is_end_of_q'    : int(d.month in [3, 6, 9, 12]
+                               and d.day >= 20),
+        'is_start_of_q'  : int(d.month in [1, 4, 7, 10]
+                               and d.day <= 10),
+        'rev_share'      : float(meta_row['rev_share']),
+        'total_revenue'  : float(meta_row['total_revenue']),
+        'abc_A'          : int(meta_row['abc'] == 'A'),
+        'abc_B'          : int(meta_row['abc'] == 'B'),
+        'abc_C'          : int(meta_row['abc'] == 'C'),
+        'cv'             : float(meta_row['cv']),
+        'zero_ratio'     : float(meta_row['zero_ratio']),
+        'adi'            : float(meta_row['adi'])
+                           if not np.isnan(meta_row['adi']) else 999.,
+        'days_active'    : float(meta_row['days_active']),
+        'xyz_X'          : int(meta_row['xyz'] == 'X'),
+        'xyz_Y'          : int(meta_row['xyz'] == 'Y'),
+        'xyz_Z'          : int(meta_row['xyz'] == 'Z'),
+        'zero_frac_7'    : float((hist.iloc[-7:] == 0).mean())
+                           if len(hist) >= 7  else 1.,
+        'zero_frac_28'   : float((hist.iloc[-28:] == 0).mean())
+                           if len(hist) >= 28 else 1.,
+        'zero_frac_90'   : float((hist.iloc[-90:] == 0).mean())
+                           if len(hist) >= 90 else 1.,
+    }
+
+    nonzero_idx = hist[hist > 0].index
+    row['days_since_last_sale'] = float(
+        (d - nonzero_idx[-1]).days
+    ) if len(nonzero_idx) > 0 else 999.
+    row['active_ratio_90'] = float(
+        (hist.iloc[-90:] > 0).mean()
+    ) if len(hist) >= 90 else 0.
+
+    for lag in LAG_DAYS:
+        row[f'lag_{lag}'] = float(
+            series.get(d - pd.Timedelta(days=lag), 0.0))
+
+    for w in ROLL_WINDOWS:
+        win = hist.iloc[-w:] if len(hist) >= w else hist
+        row[f'rmean_{w}'] = float(win.mean())
+        row[f'rstd_{w}']  = float(win.std())  if len(win) > 1 else 0.
+        row[f'rmax_{w}']  = float(win.max())
+        row[f'rpos_{w}']  = float((win > 0).mean())
+
+    same_q = hist[hist.index.quarter == d.quarter]
+    row['q_mean']    = float(same_q.mean())    if len(same_q) > 0 else 0.
+    row['q_std']     = float(same_q.std())     if len(same_q) > 1 else 0.
+    row['q_max']     = float(same_q.max())     if len(same_q) > 0 else 0.
+
+    last_yr_q = hist[
+        (hist.index.quarter == d.quarter) &
+        (hist.index.year    == d.year - 1)
+    ]
+    row['q_ly_mean'] = float(last_yr_q.mean()) if len(last_yr_q) > 0 else 0.
+    row['q_ly_sum']  = float(last_yr_q.sum())  if len(last_yr_q) > 0 else 0.
+
+    same_dow = hist[hist.index.dayofweek == d.dayofweek]
+    for wk in DOW_LAG_WKS:
+        row[f'dlag_{wk}w'] = float(same_dow.iloc[-wk]) \
+                              if len(same_dow) >= wk else 0.
+
+    for tw, key in [(28, 'trend_28'), (90, 'trend_90')]:
+        seg = hist.iloc[-tw:]
+        row[key] = float(
+            np.polyfit(np.arange(len(seg)),
+                       seg.values.astype(float), 1)[0]
+        ) if len(seg) > 2 else 0.
+
+    ly     = d - pd.DateOffset(years=1)
+    ly_win = hist[
+        (hist.index >= ly - pd.Timedelta(days=14)) &
+        (hist.index <= ly + pd.Timedelta(days=14))
+    ]
+    row['ly_mean'] = float(ly_win.mean()) if len(ly_win) > 0 else 0.
+
+    return row
+
+print(f'build_features ready — '
+      f'{len(build_features(pd.Timestamp("2025-09-06"), grid[grid.columns[0]], sku_meta.iloc[0]))} features')
+
+SKU_ORDER  = (sample[sample['id'].str.endswith('_validation')]
+              ['id'].str.replace('_validation', '').tolist())
+VAL_DATES  = pd.date_range('2025-09-06', '2025-10-03', freq='D')
+EVAL_DATES = pd.date_range('2025-10-04', '2025-10-31', freq='D')
+F_COLS     = [f'F{i}' for i in range(1, 29)]
+
+print(f'SKUs in submission : {len(SKU_ORDER)}')
+print(f'Val dates  : {VAL_DATES[0].date()} → {VAL_DATES[-1].date()}')
+print(f'Eval dates : {EVAL_DATES[0].date()} → {EVAL_DATES[-1].date()}')
+
+TIER_ML   = sku_meta[sku_meta['strategy'] == 'ML_model'].index.tolist()
+TIER_DOW  = sku_meta[sku_meta['strategy'] == 'DOW_avg'].index.tolist()
+TIER_MED  = sku_meta[sku_meta['strategy'] == 'median'].index.tolist()
+TIER_MEAN = sku_meta[sku_meta['strategy'] == 'mean'].index.tolist()
+TIER_ZERO = sku_meta[sku_meta['strategy'] == 'zero'].index.tolist()
+
+print(f'ML model   : {len(TIER_ML):>5} SKUs')
+print(f'DOW avg    : {len(TIER_DOW):>5} SKUs')
+print(f'Median     : {len(TIER_MED):>5} SKUs')
+print(f'Mean       : {len(TIER_MEAN):>5} SKUs')
+print(f'Zero       : {len(TIER_ZERO):>5} SKUs')
+print(f'Total      : {len(TIER_ML)+len(TIER_DOW)+len(TIER_MED)+len(TIER_MEAN)+len(TIER_ZERO):>5} SKUs')
+
+def dow_forecast(series, dates, n_weeks=12):
+    s = series.copy()
+    if series.iloc[-56:].sum() == 0:
+        return np.zeros(len(dates))
+    preds = []
+    for d in dates:
+        if d.dayofweek >= 5:
+            preds.append(0.0)
+            s[d] = 0.0
+            continue
+        past = s[s.index.dayofweek == d.dayofweek].iloc[-n_weeks:]
+        if len(past) > 0 and past.sum() > 0:
+            w    = np.exp(np.linspace(-2, 0, len(past)))
+            pred = float(np.average(past.values, weights=w))
+        else:
+            pred = float(s.iloc[-28:].mean())
+        pred = max(0.0, pred)
+        preds.append(pred)
+        s[d] = pred
+    return np.array(preds)
+
+def median_forecast(series, dates):
+    med = float(series.iloc[-90:][series.iloc[-90:] > 0].median()) \
+          if series.iloc[-90:].sum() > 0 else 0.0
+    return np.full(len(dates), max(0.0, med))
+
+def mean_forecast(series, dates):
+    mn = float(series.iloc[-28:].mean())
+    return np.full(len(dates), max(0.0, mn))
+
+print('Forecast functions ready ✓')
+
+forecast_cache = {}
+ZEROS = np.zeros(28)
+
+# DOW avg — BX, BY
+print(f'Forecasting {len(TIER_DOW)} DOW SKUs...')
+for i, sku in enumerate(TIER_DOW):
+    val_pred  = dow_forecast(grid[sku], VAL_DATES)
+    s_ext     = pd.concat([grid[sku],
+                           pd.Series(val_pred, index=VAL_DATES)])
+    eval_pred = dow_forecast(s_ext, EVAL_DATES)
+    forecast_cache[sku] = (val_pred, eval_pred)
+    if (i + 1) % 100 == 0:
+        print(f'  {i+1}/{len(TIER_DOW)} done...')
+print('DOW done ✓')
+
+# Median — BZ
+print(f'Forecasting {len(TIER_MED)} Median SKUs...')
+for sku in TIER_MED:
+    pred = median_forecast(grid[sku], VAL_DATES)
+    forecast_cache[sku] = (pred, pred)
+print('Median done ✓')
+
+# Mean — CX, CY
+print(f'Forecasting {len(TIER_MEAN)} Mean SKUs...')
+for sku in TIER_MEAN:
+    pred = mean_forecast(grid[sku], VAL_DATES)
+    forecast_cache[sku] = (pred, pred)
+print('Mean done ✓')
+
+# Zero — CZ
+print(f'Setting {len(TIER_ZERO)} Zero SKUs...')
+for sku in TIER_ZERO:
+    forecast_cache[sku] = (ZEROS.copy(), ZEROS.copy())
+print('Zero done ✓')
+
+print(f'\nNon-ML forecasts complete : {len(forecast_cache)} SKUs')
+
+print(f'Forecasting {len(TIER_ML)} ML SKUs...')
+
+for i, sku in enumerate(TIER_ML):
+    series   = grid[sku].copy()
+    meta_row = sku_meta.loc[sku]
+
+    val_preds = []
+    for d in VAL_DATES:
+        row  = build_features(d, series[series.index < d], meta_row)
+        Xrow = pd.DataFrame([row], columns=FEAT_COLS).fillna(0)
+        pred = max(0.0, float(np.expm1(model.predict(Xrow)[0])))
+        val_preds.append(pred)
+        series[d] = pred
+
+    eval_preds = []
+    for d in EVAL_DATES:
+        row  = build_features(d, series[series.index < d], meta_row)
+        Xrow = pd.DataFrame([row], columns=FEAT_COLS).fillna(0)
+        pred = max(0.0, float(np.expm1(model.predict(Xrow)[0])))
+        eval_preds.append(pred)
+        series[d] = pred
+
+    forecast_cache[sku] = (np.array(val_preds), np.array(eval_preds))
+
+    if (i + 1) % 20 == 0:
+        print(f'  {i+1}/{len(TIER_ML)} done...')
+
+print(f'ML done ✓  —  {len(forecast_cache)} total SKUs forecasted')
+
+rows = []
+
+for sku in SKU_ORDER:
+    vp, _ = forecast_cache.get(sku, (ZEROS, ZEROS))
+    rows.append([f'{sku}_validation'] + np.maximum(vp, 0.0).tolist())
+
+for sku in SKU_ORDER:
+    _, ep = forecast_cache.get(sku, (ZEROS, ZEROS))
+    rows.append([f'{sku}_evaluation'] + np.maximum(ep, 0.0).tolist())
+
+submission = pd.DataFrame(rows, columns=['id'] + F_COLS)
+print(f'Submission built : {submission.shape}')
+
+assert list(submission['id']) == list(sample['id']), \
+    '❌ ID order mismatch!'
+assert len(submission) == 31944, \
+    f'❌ Wrong row count: {len(submission)}'
+assert submission['id'].nunique() == 31944, \
+    '❌ Duplicate IDs!'
+assert (submission[F_COLS].values >= 0).all(), \
+    '❌ Negatives found!'
+
+vals         = submission[F_COLS].values.flatten()
+nonzero_rows = (submission[F_COLS].sum(axis=1) > 0).sum()
+
+print('=' * 45)
+print('SUBMISSION CHECKS')
+print('=' * 45)
+print(f'  Rows         : {len(submission):,}  ✓')
+print(f'  ID order     : matches sample  ✓')
+print(f'  Negatives    : 0  ✓')
+print(f'  Duplicates   : 0  ✓')
+print()
+print('=' * 45)
+print('SUBMISSION STATS')
+print('=' * 45)
+print(f'  Non-zero rows    : {nonzero_rows:,} / {len(submission):,}')
+print(f'  % zero cells     : {(vals==0).mean():.1%}')
+print(f'  Mean forecast    : {vals.mean():.4f}')
+print(f'  Max forecast     : {vals.max():.2f}')
+print(f'  Total units pred : {vals.sum():,.0f}')
+print()
+print('Sample — validation:')
+print(submission.head(3)[['id','F1','F2','F3',
+                           'F4','F5']].to_string(index=False))
+print()
+print('Sample — evaluation:')
+print(submission.iloc[15972:15975][
+    ['id','F1','F2','F3','F4','F5']].to_string(index=False))
+
+os.makedirs('../data/submission', exist_ok=True)
+submission.to_csv('../data/submission/submission_final.csv', index=False)
+print('✅ Saved → ../data/submission/submission_final.csv')
+
+os.makedirs('../output', exist_ok=True)
+
+vals         = submission[F_COLS].values.flatten()
+nonzero_rows = (submission[F_COLS].sum(axis=1) > 0).sum()
+
+report = {
+    'timestamp'         : datetime.now().strftime('%Y-%m-%d %H:%M'),
+    'model_version'     : 'v3_abcxyz',
+    'submission_file'   : 'submission_final.csv',
+    'rows'              : int(len(submission)),
+    'tier_ml_skus'      : int(len(TIER_ML)),
+    'tier_dow_skus'     : int(len(TIER_DOW)),
+    'tier_med_skus'     : int(len(TIER_MED)),
+    'tier_mean_skus'    : int(len(TIER_MEAN)),
+    'tier_zero_skus'    : int(len(TIER_ZERO)),
+    'n_features'        : int(len(FEAT_COLS)),
+    'lag_days'          : str(LAG_DAYS),
+    'nonzero_rows'      : int(nonzero_rows),
+    'pct_zero'          : round(float((vals==0).mean()) * 100, 2),
+    'mean_forecast'     : round(float(vals.mean()), 6),
+    'max_forecast'      : round(float(vals.max()), 4),
+    'total_units'       : round(float(vals.sum()), 0),
+    'leaderboard_score' : None,
+    'notes'             : 'ABC-XYZ segmentation + revenue features + ADI + CV'
+}
+
+# JSON
+with open('../output/submission_report.json', 'w') as f:
+    json.dump(report, f, indent=4)
+
+# Score tracker
+TRACKER_PATH = '../output/score_tracker.csv'
+tracker_row  = {k: v for k, v in report.items()
+                if k != 'lag_days'}
+tracker_row['leaderboard'] = None
+
+if os.path.exists(TRACKER_PATH):
+    tracker = pd.read_csv(TRACKER_PATH)
+    tracker = pd.concat([tracker,
+                         pd.DataFrame([tracker_row])],
+                         ignore_index=True)
+else:
+    tracker = pd.DataFrame([tracker_row])
+
+tracker.to_csv(TRACKER_PATH, index=False)
+
+# Run log
+with open('../output/run_log.txt', 'a') as f:
+    f.write('\n' + '='*60 + '\n')
+    f.write(f"RUN   : {report['timestamp']}\n")
+    f.write(f"MODEL : {report['model_version']}\n")
+    f.write('-'*60 + '\n')
+    f.write(f"ML SKUs    : {report['tier_ml_skus']}\n")
+    f.write(f"DOW SKUs   : {report['tier_dow_skus']}\n")
+    f.write(f"Med SKUs   : {report['tier_med_skus']}\n")
+    f.write(f"Mean SKUs  : {report['tier_mean_skus']}\n")
+    f.write(f"Zero SKUs  : {report['tier_zero_skus']}\n")
+    f.write(f"Features   : {report['n_features']}\n")
+    f.write('-'*60 + '\n')
+    f.write(f"Non-zero   : {report['nonzero_rows']:,} / "
+            f"{report['rows']:,}\n")
+    f.write(f"% zero     : {report['pct_zero']}%\n")
+    f.write(f"Mean pred  : {report['mean_forecast']}\n")
+    f.write(f"Total units: {report['total_units']:,.0f}\n")
+    f.write(f"Leaderboard: {report['leaderboard_score']}\n")
+    f.write(f"Notes      : {report['notes']}\n")
+
+print('=' * 60)
+print('ALL OUTPUT FILES SAVED')
+print('=' * 60)
+print(f'  submission_final.csv    → ../data/submission/')
+print(f'  submission_report.json  → ../output/')
+print(f'  score_tracker.csv       → ../output/')
+print(f'  run_log.txt             → ../output/')
+print()
+print('FULL REPORT:')
+for k, v in report.items():
+    print(f'  {k:<22} : {v}')
+print()
+print('ALL RUNS:')
+print(tracker[['timestamp', 'model_version',
+               'n_features', 'leaderboard',
+               'notes']].to_string(index=False))
+
+LEADERBOARD_SCORE = None   # ← paste score e.g. 0.498231
+
+if LEADERBOARD_SCORE is not None:
+    tracker = pd.read_csv('../output/score_tracker.csv')
+    tracker.loc[tracker.index[-1], 'leaderboard'] = LEADERBOARD_SCORE
+    tracker.to_csv('../output/score_tracker.csv', index=False)
+
+    with open('../output/submission_report.json', 'r') as f:
+        rpt = json.load(f)
+    rpt['leaderboard_score'] = LEADERBOARD_SCORE
+    with open('../output/submission_report.json', 'w') as f:
+        json.dump(rpt, f, indent=4)
+
+    with open('../output/run_log.txt', 'a') as f:
+        f.write(f'→ LEADERBOARD: {LEADERBOARD_SCORE}\n')
+
+    print('✅ Score saved!')
+    print(tracker[['timestamp', 'model_version',
+                   'leaderboard', 'notes']].to_string(index=False))
+else:
+    print('⚠️  Set LEADERBOARD_SCORE then re-run this cell')

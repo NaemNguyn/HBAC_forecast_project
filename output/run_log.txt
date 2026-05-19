@@ -1,0 +1,59 @@
+
+============================================================
+RUN  : 2026-05-18 16:10
+MODEL: v2_quarterly_top30
+FILE : submission_final.csv
+------------------------------------------------------------
+Tier A SKUs    : 128
+Tier B SKUs    : 376
+Tier C SKUs    : 15468
+Features       : 61
+Lag days       : [1, 2, 3, 7, 14, 21, 28, 35, 42, 56, 364, 365, 366]
+------------------------------------------------------------
+Non-zero rows  : 978 / 31,944
+% zero cells   : 97.65%
+Mean forecast  : 0.029109
+Max forecast   : 90.1603
+Total units    : 26,036
+Leaderboard    : None
+Notes          : yearly lags + quarterly features + top30 oversampling
+-> LEADERBOARD SCORE: 0.54074
+
+============================================================
+RUN  : 2026-05-18 21:42
+MODEL: v2_quarterly_top30
+FILE : submission_final.csv
+------------------------------------------------------------
+Tier A SKUs    : 19
+Tier B SKUs    : 33
+Tier C SKUs    : 15920
+Features       : 78
+Lag days       : [1, 2, 3, 7, 14, 21, 28, 35, 42, 56, 364, 365, 366]
+------------------------------------------------------------
+Non-zero rows  : 54 / 31,944
+% zero cells   : 99.84%
+Mean forecast  : 0.009598
+Max forecast   : 40.0
+Total units    : 8,585
+Leaderboard    : None
+Notes          : yearly lags + quarterly features + top30 oversampling
+
+============================================================
+RUN   : 2026-05-18 21:42
+MODEL : v3_abcxyz
+------------------------------------------------------------
+ML SKUs    : 19
+DOW SKUs   : 0
+Med SKUs   : 33
+Mean SKUs  : 0
+Zero SKUs  : 15920
+Features   : 78
+------------------------------------------------------------
+Non-zero   : 54 / 31,944
+% zero     : 99.84%
+Mean pred  : 0.009598
+Total units: 8,585
+Leaderboard: None
+Notes      : ABC-XYZ segmentation + revenue features + ADI + CV
+-> LEADERBOARD SCORE: 0.54074
+-> LEADERBOARD SCORE: 0.54208

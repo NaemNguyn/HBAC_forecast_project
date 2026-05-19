@@ -1,0 +1,6 @@
+timestamp,model_version,tier_a_skus,tier_b_skus,n_features,wrmsse_dow,wrmsse_ml,improvement,leaderboard,notes,lag_days,tier_c_skus,nonzero_rows,pct_zero,mean_forecast,total_units,submission_file,rows,tier_ml_skus,tier_dow_skus,tier_med_skus,tier_mean_skus,tier_zero_skus,max_forecast,leaderboard_score
+2026-05-18 15:57,v2_quarterly_top30,125.0,408.0,61,2.382255,2.10609,0.276165,0.54074,yearly lags + quarterly features + top30 oversampling,,,,,,,,,,,,,,,
+2026-05-18 16:02,v2_quarterly_top30,125.0,408.0,61,2.382255,2.10609,0.276165,,added yearly lags + quarterly features + top30 oversampling,"[1, 2, 3, 7, 14, 21, 28, 35, 42, 56, 364, 365, 366]",,,,,,,,,,,,,,
+2026-05-18 16:10,v2_quarterly_top30,128.0,376.0,61,,,,0.54074,yearly lags + quarterly features + top30 oversampling,,15468.0,978.0,97.65,0.029109,26036.0,,,,,,,,,
+2026-05-18 21:42,v2_quarterly_top30,19.0,33.0,78,,,,,yearly lags + quarterly features + top30 oversampling,,15920.0,54.0,99.84,0.009598,8585.0,,,,,,,,,
+2026-05-18 21:42,v3_abcxyz,,,78,,,,0.54208,ABC-XYZ segmentation + revenue features + ADI + CV,,,54.0,99.84,0.009598,8585.0,submission_final.csv,31944.0,19.0,0.0,33.0,0.0,15920.0,40.0,
